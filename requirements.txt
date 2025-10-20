@@ -2,3 +2,4 @@ PyMuPDF
 Pillow
 google-genai
 python-dotenv
+PySide6
