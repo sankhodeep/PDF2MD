@@ -9,7 +9,7 @@ from PySide6.QtCore import QThread, Signal, QObject, QEventLoop
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QTextEdit, QLabel, QFileDialog, QStatusBar, QMessageBox,
-    QComboBox, QInputDialog
+    QComboBox, QInputDialog, QCheckBox
 )
 
 CONFIG_FILE = "config.json"
@@ -20,11 +20,12 @@ class PdfConverter(QObject):
     error = Signal(str)
     user_choice_required = Signal(int)
 
-    def __init__(self, pdf_path, start_page, end_page):
+    def __init__(self, pdf_path, start_page, end_page, include_page_numbers):
         super().__init__()
         self.pdf_path = pdf_path
         self.start_page = start_page
         self.end_page = end_page
+        self.include_page_numbers = include_page_numbers
         self.is_running = True
         self.user_choice = None
 
@@ -59,15 +60,22 @@ class PdfConverter(QObject):
                         contents = [types.Content(role="user", parts=[types.Part.from_text(text=system_prompt), image_part])]
 
                         print("   -> Sending to AI model...")
-                        response = client.models.generate_content(model=model, contents=contents)
-                        page_response = response.text
+                        response = client.models.generate_content(model=model, contents=contents, stream=True)
+                        page_response = ""
+                        for chunk in response:
+                            if not self.is_running:
+                                break
+                            self.progress.emit(i + 1, chunk.text)
+                            page_response += chunk.text
                         print("   -> AI content received.")
 
-                        if page_response:
-                            self.progress.emit(i + 1, page_response)
-                            final_markdown += f"--- Page {i + 1} ---\n{page_response}\n\n"
-                        else:
-                            self.progress.emit(i + 1, "No content generated.")
+                        if self.is_running:
+                            if page_response:
+                                if self.include_page_numbers:
+                                    final_markdown += f"--- Page {i + 1} ---\n"
+                                final_markdown += f"{page_response}\n\n"
+                            else:
+                                self.progress.emit(i + 1, "No content generated.")
                         success = True
 
                     except Exception as e:
@@ -113,6 +121,7 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 800, 600)
         self.thread = None
         self.converter = None
+        self.current_processing_page = 0
         self.setup_ui()
         self.setStatusBar(QStatusBar(self))
         self.statusBar().showMessage("Ready")
@@ -165,12 +174,21 @@ class MainWindow(QMainWindow):
         md_layout.addWidget(save_as_button)
         self.main_layout.addLayout(md_layout)
         action_layout = QHBoxLayout()
+        self.include_page_numbers_checkbox = QCheckBox("Include page numbers in output")
+        self.include_page_numbers_checkbox.setChecked(True)
         self.start_button = QPushButton("Start Conversion")
         self.start_button.clicked.connect(self.start_conversion)
         action_layout.addStretch()
+        action_layout.addWidget(self.include_page_numbers_checkbox)
         action_layout.addWidget(self.start_button)
         action_layout.addStretch()
         self.main_layout.addLayout(action_layout)
+
+        self.pdf_path_edit.textChanged.connect(self._update_start_button_state)
+        self.md_path_edit.textChanged.connect(self._update_start_button_state)
+        self.start_page_edit.textChanged.connect(self._update_start_button_state)
+        self.end_page_edit.textChanged.connect(self._update_start_button_state)
+        self._update_start_button_state()
 
     def ask_user_choice(self, page_num):
         msg_box = QMessageBox(self)
@@ -193,9 +211,15 @@ class MainWindow(QMainWindow):
     def start_conversion(self):
         self.set_ui_enabled(False)
         self.content_display.clear()
+        self.current_processing_page = 0
         self.statusBar().showMessage("Starting...")
         self.thread = QThread()
-        self.converter = PdfConverter(self.pdf_path_edit.text(), int(self.start_page_edit.text()), int(self.end_page_edit.text()))
+        self.converter = PdfConverter(
+            self.pdf_path_edit.text(),
+            int(self.start_page_edit.text()),
+            int(self.end_page_edit.text()),
+            self.include_page_numbers_checkbox.isChecked()
+        )
         self.converter.moveToThread(self.thread)
         self.thread.started.connect(self.converter.run)
         self.converter.progress.connect(self.update_progress)
@@ -206,6 +230,15 @@ class MainWindow(QMainWindow):
         self.converter.finished.connect(self.thread.quit)
         self.converter.finished.connect(self.converter.deleteLater)
         self.thread.start()
+
+    def _update_start_button_state(self):
+        all_fields_filled = all([
+            self.pdf_path_edit.text(),
+            self.md_path_edit.text(),
+            self.start_page_edit.text(),
+            self.end_page_edit.text()
+        ])
+        self.start_button.setEnabled(all_fields_filled)
 
     def load_configs(self):
         self.config_combo.clear()
@@ -231,8 +264,17 @@ class MainWindow(QMainWindow):
                 with open(CONFIG_FILE, "r") as f: configs = json.load(f)
                 config_data = configs.get(config_name)
                 if config_data:
-                    self.pdf_path_edit.setText(config_data.get("pdf_path", ""))
+                    pdf_path = config_data.get("pdf_path", "")
+                    self.pdf_path_edit.setText(pdf_path)
                     self.md_path_edit.setText(config_data.get("md_path", ""))
+                    if pdf_path:
+                        try:
+                            with fitz.open(pdf_path) as doc:
+                                self.page_count_label.setText(f"  Total Pages: 1-{doc.page_count}")
+                        except fitz.errors.FitzError:
+                            self.page_count_label.setText("  Invalid PDF")
+                    else:
+                        self.page_count_label.setText("")
             except (json.JSONDecodeError, IOError): pass
     def delete_config(self):
         config_name = self.config_combo.currentText()
@@ -257,7 +299,12 @@ class MainWindow(QMainWindow):
         if file_name: self.md_path_edit.setText(file_name)
     def update_progress(self, page_num, content):
         self.statusBar().showMessage(f"Processing page {page_num}...")
-        self.content_display.append(f"--- Page {page_num} ---\n{content}\n")
+        if self.current_processing_page != page_num:
+            self.current_processing_page = page_num
+            if self.include_page_numbers_checkbox.isChecked():
+                self.content_display.append(f"--- Page {page_num} ---\n")
+        self.content_display.insertPlainText(content)
+        self.content_display.ensureCursorVisible()
     def on_conversion_finished(self, markdown_content):
         self.statusBar().showMessage("Success! Saving file...")
         try:
@@ -274,10 +321,22 @@ class MainWindow(QMainWindow):
             for widget in self.centralWidget().findChildren(widget_type): widget.setEnabled(enabled)
     def closeEvent(self, event):
         if self.thread and self.thread.isRunning():
-            self.converter.stop()
-            self.thread.quit()
-            self.thread.wait()
-        event.accept()
+            reply = QMessageBox.question(
+                self,
+                "Confirm Close",
+                "A conversion is currently in progress. Closing now will result in unsaved changes. Are you sure you want to close?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self.converter.stop()
+                self.thread.quit()
+                self.thread.wait()
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
 
 if __name__ == "__main__":
     if "GEMINI_API_KEY" not in os.environ:
