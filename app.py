@@ -33,7 +33,7 @@ class PdfConverter(QObject):
         print("🤖 Starting PDF to Markdown conversion...")
         try:
             client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-            model = "gemini-2.5-pro"
+            model = "gemini-3-pro-preview"
             with open("ocr_prompt.txt", "r", encoding="utf-8") as f: system_prompt = f.read()
             final_markdown = ""
             doc = fitz.open(self.pdf_path)
@@ -60,7 +60,7 @@ class PdfConverter(QObject):
                         contents = [types.Content(role="user", parts=[types.Part.from_text(text=system_prompt), image_part])]
 
                         print("   -> Sending to AI model...")
-                        response = client.models.generate_content(model=model, contents=contents, stream=True)
+                        response = client.models.generate_content_stream(model=model, contents=contents)
                         page_response = ""
                         for chunk in response:
                             if not self.is_running:
