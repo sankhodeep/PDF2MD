@@ -9,7 +9,7 @@ from PySide6.QtCore import QThread, Signal, QObject, QEventLoop
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QTextEdit, QLabel, QFileDialog, QStatusBar, QMessageBox,
-    QComboBox, QInputDialog, QCheckBox
+    QComboBox, QInputDialog, QCheckBox, QDialog
 )
 
 CONFIG_FILE = "config.json"
@@ -20,12 +20,13 @@ class PdfConverter(QObject):
     error = Signal(str)
     user_choice_required = Signal(int)
 
-    def __init__(self, pdf_path, start_page, end_page, include_page_numbers):
+    def __init__(self, pdf_path, start_page, end_page, include_page_numbers, model_name):
         super().__init__()
         self.pdf_path = pdf_path
         self.start_page = start_page
         self.end_page = end_page
         self.include_page_numbers = include_page_numbers
+        self.model_name = model_name
         self.is_running = True
         self.user_choice = None
 
@@ -33,7 +34,7 @@ class PdfConverter(QObject):
         print("🤖 Starting PDF to Markdown conversion...")
         try:
             client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-            model = "gemini-3-pro-preview"
+            model = self.model_name
             with open("ocr_prompt.txt", "r", encoding="utf-8") as f: system_prompt = f.read()
             final_markdown = ""
             doc = fitz.open(self.pdf_path)
@@ -122,6 +123,7 @@ class MainWindow(QMainWindow):
         self.thread = None
         self.converter = None
         self.current_processing_page = 0
+        self.model_name = "gemini-3-pro-preview"
         self.setup_ui()
         self.setStatusBar(QStatusBar(self))
         self.statusBar().showMessage("Ready")
@@ -161,6 +163,17 @@ class MainWindow(QMainWindow):
         page_range_layout.addWidget(self.page_count_label)
         page_range_layout.addStretch()
         self.main_layout.addLayout(page_range_layout)
+
+        # Model and Prompt info
+        info_layout = QHBoxLayout()
+        self.model_info_label = QLabel(f"<b>Model:</b> {self.model_name}")
+        self.view_prompt_button = QPushButton("View AI Prompt")
+        self.view_prompt_button.clicked.connect(self.show_prompt_dialog)
+        info_layout.addWidget(self.model_info_label)
+        info_layout.addStretch()
+        info_layout.addWidget(self.view_prompt_button)
+        self.main_layout.addLayout(info_layout)
+
         self.content_display = QTextEdit()
         self.content_display.setReadOnly(True)
         self.main_layout.addWidget(QLabel("Live Output:"))
@@ -190,6 +203,29 @@ class MainWindow(QMainWindow):
         self.end_page_edit.textChanged.connect(self._update_start_button_state)
         self._update_start_button_state()
 
+    def show_prompt_dialog(self):
+        try:
+            with open("ocr_prompt.txt", "r", encoding="utf-8") as f:
+                prompt_text = f.read()
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Current AI System Prompt")
+            dialog.setMinimumSize(600, 450)
+            layout = QVBoxLayout(dialog)
+            
+            prompt_view = QTextEdit()
+            prompt_view.setPlainText(prompt_text)
+            prompt_view.setReadOnly(True)
+            layout.addWidget(prompt_view)
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            layout.addWidget(close_btn)
+            
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not read ocr_prompt.txt: {e}")
+
     def ask_user_choice(self, page_num):
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Conversion Error")
@@ -218,7 +254,8 @@ class MainWindow(QMainWindow):
             self.pdf_path_edit.text(),
             int(self.start_page_edit.text()),
             int(self.end_page_edit.text()),
-            self.include_page_numbers_checkbox.isChecked()
+            self.include_page_numbers_checkbox.isChecked(),
+            self.model_name
         )
         self.converter.moveToThread(self.thread)
         self.thread.started.connect(self.converter.run)
